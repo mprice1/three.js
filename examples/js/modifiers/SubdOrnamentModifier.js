@@ -26,28 +26,6 @@
  *		selective subdivision
  */
 
-THREE.Face4Stub = function ( a, b, c, d, normal, color, materialIndex ) {
-
-	this.a = a;
-	this.b = b;
-	this.c = c;
-	this.d = d;
-
-	this.normal = normal instanceof THREE.Vector3 ? normal : new THREE.Vector3();
-	this.vertexNormals = normal instanceof Array ? normal : [ ];
-
-	this.color = color instanceof THREE.Color ? color : new THREE.Color();
-	this.vertexColors = color instanceof Array ? color : [];
-
-	this.vertexTangents = [];
-
-	this.materialIndex = materialIndex !== undefined ? materialIndex : 0;
-
-	this.centroid = new THREE.Vector3();
-
-};
-
-
 THREE.GeometryUtils.convertFace4s = function(geometry) {
 
 	// return geometry;
@@ -89,24 +67,58 @@ THREE.GeometryUtils.convertFace4s = function(geometry) {
 }
 
 
-THREE.SubdivisionModifier = function ( subdivisions ) {
+THREE.SubdOrnamentModifier = function ( subdivisions ) {
 
 	this.subdivisions = (subdivisions === undefined ) ? 1 : subdivisions;
 
 	// Settings
 	this.useOldVertexColors = false;
-	this.supportUVs = true;
+	this.supportUVs = false;
 	this.debug = false;
+
+    // If this array is populated, use one of these weight stencils for each iteration.
+    // If there are fewer stencils than iterations, continue using the last one.
+	this.weightStencils = [];
+
+    // TODO(mprice): "constants" lol
+	// Uniform weight constants for ornamentation.
+	this.FACE_POINT_EXTRUSION_WEIGHT = 0;  // wf in the paper.
+	this.EDGE_POINT_EXTRUSION_WEIGHT =  0;  // we in the paper.
+	this.EDGE_POINT_FACE_INFLUENCE_WEIGHT = 0; // w1 in the paper.
+	this.VERTEX_POINT_EXTRUSION_WEIGHT = 0;  // wc in the paper.
+	this.VERTEX_POINT_FACE_INFLUENCE_WEIGHT = 0;  // w2 in the paper.
+	this.FACE_POINT_EDGE_INFLUENCE_WEIGHT = 0;  // w4 in the paper. Must be [0, 1]
+	this.FACE_POINT_CORNER_INFLUENCE_WEIGHT = 0;  // w3 in the paper Must be [0, 1]
 
 };
 
+THREE.SubdOrnamentModifier.prototype.setWeightStencils = function(stencils) {
+	this.weightStencils = stencils;
+}
+
+THREE.SubdOrnamentModifier.prototype.setWeights = function(weights) {
+  if (typeof weights.wf == 'number') this.FACE_POINT_EXTRUSION_WEIGHT = weights.wf;
+  if (typeof weights.we == 'number') this.EDGE_POINT_EXTRUSION_WEIGHT = weights.we;
+  if (typeof weights.wc == 'number') this.VERTEX_POINT_EXTRUSION_WEIGHT = weights.wc;
+  if (typeof weights.w1 == 'number') this.EDGE_POINT_FACE_INFLUENCE_WEIGHT = weights.w1;
+  if (typeof weights.w2 == 'number') this.VERTEX_POINT_FACE_INFLUENCE_WEIGHT = weights.w2;
+  if (typeof weights.w3 == 'number') this.FACE_POINT_CORNER_INFLUENCE_WEIGHT = weights.w3;
+  if (typeof weights.w4 == 'number') this.FACE_POINT_EDGE_INFLUENCE_WEIGHT = weights.w4;
+}
+
 // Applies the "modify" pattern
-THREE.SubdivisionModifier.prototype.modify = function ( geometry ) {
+THREE.SubdOrnamentModifier.prototype.modify = function ( geometry ) {
 
 	var repeats = this.subdivisions;
 
-	while ( repeats-- > 0 ) {
-		this.smooth( geometry );
+    var newVertexTypes = {};
+    var oldVertexTypes = {};
+	//while ( repeats-- > 0 ) {
+	for (var i = 0; i < repeats; i++) {
+		if (this.weightStencils.length > i) this.setWeights(this.weightStencils[i]);
+		this.smooth( geometry, oldVertexTypes, newVertexTypes );
+		oldVertexTypes = newVertexTypes;
+		newVertexTypes = {};
 	}
 
 	THREE.GeometryUtils.convertFace4s( geometry );
@@ -151,7 +163,6 @@ THREE.GeometryUtils.computeEdgeFaces = function ( geometry ) {
 
 
 	// construct vertex -> face map
-
 	for( i = 0, il = geometry.faces.length; i < il; i ++ ) {
 
 		face = geometry.faces[ i ];
@@ -207,12 +218,19 @@ THREE.GeometryUtils.computeEdgeFaces = function ( geometry ) {
 /////////////////////////////
 
 // Performs an iteration of Catmull-Clark Subdivision
-THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
-
-	//debug( 'running smooth' );
+// oldGeometry: The geometry to smooth. Ideally made of Face4Stubs, but can be Face3.
+// oldVertexTypes: 
+THREE.SubdOrnamentModifier.prototype.smooth = function ( oldGeometry, oldVertexTypes, newVertexTypes ) {
 
 	// New set of vertices, faces and uvs
 	var newVertices = [], newFaces = [], newUVs = [];
+	
+    // The last indices of each vertex type. Always in order corner point, face point, edge point.
+    // eg:
+    // {'v': 10, 'f': 20, 'e': 30}
+    // Would represent a mesh where vertices 0-10 are corner points, 11-20 are face points, and 21-30 are edge points.
+	newVertexTypes = newVertexTypes || {};
+	oldVertexTypes = oldVertexTypes || {};
 
 	function v( x, y, z ) {
 		newVertices.push( new THREE.Vector3( x, y, z ) );
@@ -223,23 +241,30 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 	var computeEdgeFaces = THREE.GeometryUtils.computeEdgeFaces;
 
 	function assert() {
-
 		if (scope.debug && console && console.assert) console.assert.apply(console, arguments);
-
 	}
 
 	function debug() {
-
 		if (scope.debug) console.log.apply(console, arguments);
-
 	}
 
 	function warn() {
-
-		if (console)
-		console.log.apply(console, arguments);
-
+		if (console) console.log.apply(console, arguments);
 	}
+
+    function getVertexType(vertexTypes, i) {
+    	if (typeof vertexTypes.v == 'number' && typeof vertexTypes.f == 'number' && typeof vertexTypes.e == 'number') {
+          if (i <= vertexTypes.v) {
+          	return 'v';
+          } else if (i <= vertexTypes.f) {
+          	return 'f';
+          } else {
+          	return 'e';
+          } 
+    	} else {
+    		return null;
+    	}
+    }
 
 	function f4( a, b, c, d, oldFace, orders, facei ) {
 
@@ -272,9 +297,7 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 				color.b /= order.length;
 
 				newFace.vertexColors[i] = color;
-
 			}
-
 		}
 
 		newFaces.push( newFace );
@@ -298,11 +321,52 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		}
 	}
 
+    // Returns the face normal or the average of vertex normals for the face.
+	function getFaceNormal(face) {
+	  var normal = new THREE.Vector3();
+      if (face.vertexNormals.length > 0) {
+        for (var i = 0; i < face.vertexNormals.length; i++) {
+          normal.add(face.vertexNormals[i]);
+        }
+        normal.divideScalar(face.vertexNormals.length);
+      } else {
+        normal.add(face.normal)
+      }
+      return normal;
+	}
+
+    // Vertex edge map is like:
+    // { vertA: [[vertA, vertB], [vertA, vertC]]}
+
+	// Vertex face map is like:
+	// { vertA: { face1: "vertA_vertB" } }
+	function getVertexNormal(vertexIndex, vertexFaceMap, faces) {
+	  // TODO(mprice): Would be nice to look up vertex normals directly if they exist...
+	  var normal = new THREE.Vector3();
+	  var numFaces = 0;
+      for (f in vertexFaceMap[vertexIndex]) {
+      	normal.add(getFaceNormal(faces[f]));
+      	numFaces++;
+      }
+      if (numFaces > 0) normal.divideScalar(numFaces);
+      return normal;
+	}
+
+	function getEdgeNormal(vertexA, vertexB, vertexFaceMap, faces) {
+      var normal = new THREE.Vector3();
+      normal.addVectors(
+      	  getVertexNormal(vertexA, vertexFaceMap, faces),
+      	  getVertexNormal(vertexB, vertexFaceMap, faces));
+      normal.multiplyScalar(0.5);
+      return normal;
+	}
+
 	var originalPoints = oldGeometry.vertices;
 	var originalFaces = oldGeometry.faces;
 	var originalVerticesLength = originalPoints.length;
 
 	var newPoints = originalPoints.concat(); // New set of vertices to work on
+	newVertexTypes['v'] = newPoints.length - 1;
 
 	var facePoints = [], // these are new points on exisiting faces
 		edgePoints = {}; // these are new points on exisiting edges
@@ -359,7 +423,6 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 	// Step 1
 	//	For each face, add a face point
 	//	Set each face point to be the centroid of all original points for the respective face.
-	// debug(oldGeometry);
 	var i, il, j, jl, face;
 
 	// For Uvs
@@ -368,11 +431,12 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 
 	debug('originalFaces, uvs, originalVerticesLength', originalFaces.length, uvs.length, originalVerticesLength);
 
+
 	if (scope.supportUVs)
 
 	for (i=0, il = uvs.length; i<il; i++ ) {
 
-		for (j=0,jl=uvs[i].length;j<jl;j++) {
+		for (j=0, jl=uvs[i].length; j<jl; j++) {
 
 			vertice = originalFaces[i][abcd.charAt(j)];
 			addUV(vertice, i, uvs[i][j]);
@@ -398,14 +462,44 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 	for (i=0, il = originalFaces.length; i<il ;i++) {
 
 		face = originalFaces[ i ];
+		var extrudedFacePoint = new THREE.Vector3();
 		var facePoint = new THREE.Vector3();
         facePoint.add(newPoints[face.a]);
         facePoint.add(newPoints[face.b]);
         facePoint.add(newPoints[face.c]);
-        facePoint.add(newPoints[face.d]);
-        facePoint.divideScalar(4);
-		facePoints.push( facePoint );
-		newPoints.push( facePoint );
+        if (face instanceof THREE.Face4Stub) facePoint.add(newPoints[face.d]);
+        facePoint.divideScalar(face instanceof THREE.Face4Stub ? 4 : 3);
+
+		// If this isn't the first iteration, do the vertex-type-based weighting.
+		if (face instanceof THREE.Face4Stub && oldVertexTypes.v && oldVertexTypes.f && oldVertexTypes.e) {
+          var vtype, v_, f_, e_ = new THREE.Vector3();
+          var vct = 0, ect = 0, fct = 0;
+          for (var i_ = 0; i_ < 4; i_++){
+          	var idx = face[abcd.charAt(i_)];
+            vtype = getVertexType(oldVertexTypes, idx);
+            if (vtype == 'v') {
+            	v_ = newPoints[idx];
+            	vct++;
+            } else if (vtype == 'f') {
+            	f_ = newPoints[idx];
+            	fct++;
+            } else if (vtype == 'e') {
+            	e_.add(newPoints[idx]);
+            	ect++;
+            }
+          }
+          var w3 = scope.FACE_POINT_CORNER_INFLUENCE_WEIGHT;
+          var w4 = scope.FACE_POINT_EDGE_INFLUENCE_WEIGHT;
+          facePoint = new THREE.Vector3();
+          facePoint.add(v_.multiplyScalar(1 + w3));
+          facePoint.add(f_.multiplyScalar(1 - w3));
+          facePoint.multiplyScalar(1 + w4);
+          facePoint.add(e_.multiplyScalar(1 - w4));
+          facePoint.divideScalar(4);
+		}
+		extrudedFacePoint.addVectors(facePoint, getFaceNormal(face).multiplyScalar(scope.FACE_POINT_EXTRUSION_WEIGHT));
+		facePoints.push( extrudedFacePoint );
+		newPoints.push( extrudedFacePoint );
 
 		if (!scope.supportUVs) continue;
 
@@ -432,6 +526,8 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		addUV(originalVerticesLength + i, '', avgUv);
 
 	}
+    newVertexTypes['f'] = newPoints.length - 1;
+
 
 	// Step 2
 	//	For each edge, add an edge point.
@@ -448,8 +544,13 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 
 	////
 
-	var vertexEdgeMap = {}; // Gives edges connecting from each vertex
-	var vertexFaceMap = {}; // Gives faces connecting from each vertex
+    // Gives edges connecting from each vertex.
+    // { vertA: [[vertA, vertB], [vertA, vertC]]}
+    // { 1: [[1, 2], [1, 3]]}
+	var vertexEdgeMap = {};
+	// Gives faces connecting from each vertex
+	// { vertA: { face1: "vertA_vertB" } }
+	var vertexFaceMap = {}; 
 
 	function addVertexEdgeMap(vertex, edge) {
 
@@ -507,7 +608,7 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		}
 
 	}
-
+ 
 	for (i in edgeFaceMap) {
 
 		edge = edgeFaceMap[i];
@@ -526,7 +627,6 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		assert(edge.length > 0, 'an edge without faces?!');
 
 		if (edge.length==1) {
-
 			avg.add( originalPoints[ edgeVertexA ] );
 			avg.add( originalPoints[ edgeVertexB ] );
 			avg.multiplyScalar( 0.5 );
@@ -534,19 +634,26 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 			sharpVertices[newPoints.length] = true;
 
 		} else {
+            var w1 = scope.EDGE_POINT_FACE_INFLUENCE_WEIGHT;
 
 			avg.add( facePoints[ faceIndexA ] );
 			avg.add( facePoints[ faceIndexB ] );
+			avg.multiplyScalar(1 + w1);
 
-			avg.add( originalPoints[ edgeVertexA ] );
-			avg.add( originalPoints[ edgeVertexB ] );
+            var evs = new THREE.Vector3();
+			evs.add( originalPoints[ edgeVertexA ] );
+			evs.add( originalPoints[ edgeVertexB ] );
+			evs.multiplyScalar(1 - w1);
 
+            avg.add(evs);
 			avg.multiplyScalar( 0.25 );
 
 		}
 
-		edgePoints[i] = originalVerticesLength + originalFaces.length + edgeCount;
+        avg.add(getEdgeNormal(edgeVertexA, edgeVertexB, vertexFaceMap, originalFaces).multiplyScalar(scope.EDGE_POINT_EXTRUSION_WEIGHT))
 
+		edgePoints[i] = originalVerticesLength + originalFaces.length + edgeCount;
+ 
 		newPoints.push( avg );
 
 		edgeCount ++;
@@ -579,6 +686,7 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		}
 
 	}
+	newVertexTypes['e'] = newPoints.length - 1;
 
 	debug('-- Step 2 done');
 
@@ -646,15 +754,14 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 	//		take the average F of all n face points for faces touching P, 
 	//		and take the average R of all n edge midpoints for edges touching P, 
 	//		where each edge midpoint is the average of its two endpoint vertices. 
-	//	Move each original point to the point
-
+	//	Move each original point to the point (F + 2R + (n-3)P) / n
 
 	var F = new THREE.Vector3();
 	var R = new THREE.Vector3();
 
 	var n;
 	for (i=0, il = originalPoints.length; i<il; i++) {
-		// (F + 2R + (n-3)P) / n
+		
 
 		if (vertexEdgeMap[i]===undefined) continue;
 
@@ -675,10 +782,6 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		// Are we on the border?
 		var boundary_case = f != n;
 
-		// if (boundary_case) {
-		// 	console.error('moo', 'o', i, 'faces touched', f, 'edges',  n, n == 2);
-		// }
-
 		for (j=0;j<n;j++) {
 			if (
 				sharpEdges[
@@ -687,17 +790,6 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 					sharpEdgeCount++;
 				}
 		}
-
-		// if ( sharpEdgeCount==2 ) {
-		// 	continue;
-		// 	// Do not move vertex if there's 2 connecting sharp edges.
-		// }
-
-		/*
-		if (sharpEdgeCount>2) {
-			// TODO
-		}
-		*/
 
 		F.divideScalar(f);
 
@@ -734,21 +826,26 @@ THREE.SubdivisionModifier.prototype.smooth = function ( oldGeometry ) {
 		// Sum the formula
 		newPos.add(originalPoints[i]);
 
-
+        // (F + 2R + (n-3)P) / n
+        // Or for ornamentation:
+        // (F(1 + w2) + 2R(1 - w2) + (n-3)P) / n
 		if (boundary_case) {
 
 			newPos.divideScalar(2);
 			newPos.add(R);
 
 		} else {
+			var w2 = scope.VERTEX_POINT_FACE_INFLUENCE_WEIGHT;
 
 			newPos.multiplyScalar(n - 3);
 
-			newPos.add(F);
-			newPos.add(R.multiplyScalar(2));
+			newPos.add(F.multiplyScalar(1 + w2));
+			newPos.add(R.multiplyScalar(2 * (1 - w2)));
 			newPos.divideScalar(n);
 
 		}
+
+		newPos.add(getVertexNormal(i, vertexFaceMap, originalFaces).multiplyScalar(scope.VERTEX_POINT_EXTRUSION_WEIGHT));
 
 		newVertices[i] = newPos;
 

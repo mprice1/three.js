@@ -524,6 +524,7 @@ THREE.Geometry.prototype = {
 			face.a = changes[ face.a ];
 			face.b = changes[ face.b ];
 			face.c = changes[ face.c ];
+			if (face instanceof THREE.Face4Stub) face.d = changes[ face.d ];
 
 			indices = [ face.a, face.b, face.c ];
 
